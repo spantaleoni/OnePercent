@@ -5,12 +5,12 @@ import os
 
 class OnePercent(BaseStrategy):
     """
-    Weekly TQQQ strategy with daily timeframe execution:
+    Weekly TQQQ strategy with daily timeframe execution (no lookahead):
       - Entry: go long TQQQ at Monday (or first trading day of week) open, full allocation
-      - Type A: if daily close ≥ +8.1% or +7.0% from entry, exit next day at open
-      - Type B: no TP hit, week ends positive -> exit at Friday close (flat next open)
-      - Type C: if daily close < entry price, exit next day at open (break-even modeled as flat)
-      - Type D: no other exit, week ends negative -> exit at Friday close (flat next open)
+      - Type A: if prior daily close ≥ +8.1% or +7.0% from entry, exit today at open
+      - Type B: no TP hit, prior day was last of week and week closed positive -> exit today at open
+      - Type C: if prior daily close < entry price, exit today at open (break-even modeled as flat)
+      - Type D: no other exit, prior day was last of week and week closed negative -> exit today at open
 
     No volatility-based switching. Always trades TQQQ.
     """
@@ -33,8 +33,6 @@ class OnePercent(BaseStrategy):
         self.entry_price = None
         self.entry_date = None
         self.entry_week = None
-        self.exit_next_open_pending = False  # used for Type A/C exits
-        self.exit_eod_pending = False        # used for Type B/D exits
 
         self.strategy_file = os.path.basename(__file__)
 
@@ -77,44 +75,35 @@ class OnePercent(BaseStrategy):
 
             allocation.iloc[i, :] = 0.0
 
-            # Handle pending exits
-            if self.exit_next_open_pending:
-                self.in_position = False
-                self.exit_next_open_pending = False
-                self.entry_price = None
-                self.entry_date = None
-                self.entry_week = None
-
-            elif self.exit_eod_pending:
-                self.in_position = False
-                self.exit_eod_pending = False
-                self.entry_price = None
-                self.entry_date = None
-                self.entry_week = None
-
-            elif self.in_position:
-                today_close = data[("Close", "TQQQ")].iloc[i]
+            if self.in_position:
+                # Use yesterday's close to decide
+                yesterday_close = data[("Close", "TQQQ")].iloc[i-1]
 
                 # --- Type A: Take Profit ---
-                if today_close >= self.entry_price * 1.081 or today_close >= self.entry_price * 1.07:
-                    self.exit_next_open_pending = True
-                    allocation.loc[date, "TQQQ"] = 1.0
+                if yesterday_close >= self.entry_price * 1.081 or yesterday_close >= self.entry_price * 1.07:
+                    self.in_position = False
+                    self.entry_price = None
+                    self.entry_date = None
+                    self.entry_week = None
 
                 # --- Type C: Break-even ---
-                elif today_close < self.entry_price:
-                    self.exit_next_open_pending = True
-                    allocation.loc[date, "TQQQ"] = 1.0
+                elif yesterday_close < self.entry_price:
+                    self.in_position = False
+                    self.entry_price = None
+                    self.entry_date = None
+                    self.entry_week = None
 
                 else:
                     # --- Type B/D: End-of-week exit ---
-                    next_date = index_list[i + 1] if (i + 1) < n else None
-                    if self._weekly_last_trading_day(date, next_date):
-                        self.exit_eod_pending = True
-                        allocation.loc[date, "TQQQ"] = 1.0
-                    else:
-                        allocation.loc[date, "TQQQ"] = 1.0
+                    next_date = index_list[i] if (i) < n else None  # today is considered "next day" of yesterday
+                    if self._weekly_last_trading_day(index_list[i-1], next_date):
+                        self.in_position = False
+                        self.entry_price = None
+                        self.entry_date = None
+                        self.entry_week = None
 
-            else:
+            # Entry check if flat
+            if not self.in_position:
                 if self._is_new_week(prev_date, date):
                     self.in_position = True
                     self.entry_price = data[("Open", "TQQQ")].iloc[i]
@@ -122,8 +111,8 @@ class OnePercent(BaseStrategy):
                     iso = date.isocalendar()
                     self.entry_week = (iso.year, iso.week)
                     allocation.loc[date, "TQQQ"] = 1.0
-                else:
-                    allocation.iloc[i, :] = 0.0
+            else:
+                allocation.loc[date, "TQQQ"] = 1.0
 
             prev_date = date
 
